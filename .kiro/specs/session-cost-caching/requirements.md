@@ -17,6 +17,16 @@ This spec covers three capabilities investigated together on branch
    immutable SHAs, and change the auto-update default from opt-out to opt-in so a
    compromised PyPI release cannot silently propagate to every user.
 
+> **Feasibility status (updated).** Investigation concluded that Requirement 2's
+> *automatic, local, reduce-the-rebuild on a left-open/walk-away live session* is
+> **NOT achievable** with current Claude Code hooks/architecture — a live session
+> is in-memory authoritative, no hook can inject a pruned transcript, and applying
+> one requires a disruptive exit+resume cycle. See `evidence-trail.md` §7. The
+> feasible subset is Req 1 (cost logging), Req 2 **only** for the closed-then-`--resume`
+> pattern or as a semi-automatic nudge, the `ENABLE_PROMPT_CACHING_1H` config path,
+> and Req 3–5 (supply chain). Requirement 2's live-walk-away criteria are retained
+> below for the record but are superseded by this verdict.
+
 ### Grounding in the current codebase
 
 - The only "end-ish" hook today is `Stop` (`src/cozempic/data/hooks.json:65`),
