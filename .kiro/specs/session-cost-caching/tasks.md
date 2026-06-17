@@ -34,10 +34,15 @@ stays green between steps.
   (`COZEMPIC_SESSION_END_COMPRESS_MIN_BYTES`), and the
   `COZEMPIC_SESSION_END_COMPRESS_OFF` opt-out. _(Req 2.7, 2.9)_
 - [ ] 2.3 Add the **idle-past-cache-TTL** trigger to the guard daemon
-  (`src/cozempic/guard.py`): track last-activity timestamp; when `now -
-  last_activity > COZEMPIC_CACHE_TTL_SECONDS` (default 300s) AND above target AND
-  not `detect_in_flight`, call `compress_to_target`. Fire at most once per idle
-  episode (re-arm on new activity). _(Req 2.2, 2.4, 2.5)_
+  (`src/cozempic/guard.py`): track last-activity (transcript mtime); auto-derive
+  the threshold from the TTL mode (`ENABLE_PROMPT_CACHING_1H` + subscription/
+  API-key detection → ~300s/~3600s; `COZEMPIC_CACHE_TTL_SECONDS` overrides); when
+  `now - last_activity > threshold + ε` (fire *after* expiry, never before) AND
+  above target AND not `detect_in_flight`, call `compress_to_target`. Fire at most
+  once per idle episode (re-arm on new activity). _(Req 2.2, 2.2a, 2.2b, 2.4, 2.5)_
+- [ ] 2.3a Add a TTL-mode detector helper + unit tests: `ENABLE_PROMPT_CACHING_1H`
+  truthy → 3600s; API-key billing → 300s; subscription → 3600s; explicit
+  `COZEMPIC_CACHE_TTL_SECONDS` always wins. _(Req 2.2a)_
 - [ ] 2.4 Unit tests: ladder escalates only as far as needed (gentle suffices →
   stops at gentle; huge session → reaches aggressive); already-at-target skip;
   lock/append-conflict skips; below-floor skip; backup created. _(Req 2.1, 2.6–2.9)_

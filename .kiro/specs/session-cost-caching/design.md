@@ -164,15 +164,29 @@ def compress_to_target(path, messages, snapshot) -> CompressResult:
 Two trigger paths drive Component B; the idle one is primary because the doc
 research found `SessionEnd` is unreliable on `/exit` and `/clear`:
 
-1. **Idle-past-cache-TTL (primary, Req 2.2/2.4/2.5).** The guard daemon
+1. **Idle-past-cache-TTL (primary, Req 2.2/2.2a/2.2b/2.4/2.5).** The guard daemon
    (`cozempic guard --daemon`, already spawned at SessionStart and already
-   polling the transcript — `src/cozempic/guard.py`) gains an idle check: track
-   the last user/assistant activity timestamp; WHEN `now - last_activity >
-   COZEMPIC_CACHE_TTL_SECONDS` (default 300s) AND the transcript is above target
-   AND no work is in flight (`detect_in_flight`) THEN run `compress_to_target`.
-   The TTL gate is the key insight: once the prompt cache has expired there is
-   **no warm hit left to forfeit**, so pruning at that instant is downside-free
-   and pre-positions the next re-trigger to replay a slim prefix.
+   polling the transcript — `src/cozempic/guard.py`) gains an idle check that
+   tracks last-activity (transcript mtime / last main-chain message).
+
+   - **Auto-derive the threshold from the cache-TTL mode** (Req 2.2a): inspect
+     `ENABLE_PROMPT_CACHING_1H` and the subscription-vs-API-key signal
+     (subscriptions auto-use the 1-hour TTL) → threshold ≈ 300s or ≈ 3600s.
+     `COZEMPIC_CACHE_TTL_SECONDS` overrides. The two TTL modes differ in *write*
+     price (1.25× at 5-min, 2.0× at 1-hour; reads are 0.1× for both), which is
+     why the wait must match the mode rather than a fixed constant.
+   - **Fire just after expiry, never before** (Req 2.2b): WHEN
+     `now - last_activity > threshold + ε` AND transcript above target AND no
+     work in flight (`detect_in_flight`) THEN run `compress_to_target`. Pruning
+     rewrites the prefix and would invalidate a still-warm cache; firing before
+     expiry could forfeit a 0.1× hit for no gain. After expiry there is **no warm
+     hit left to forfeit**, so pruning is downside-free and pre-positions the
+     next resume to re-ingest a slim file → a cheaper (but still unavoidable)
+     rebuild, and native LLM compaction pre-empted.
+
+   Note the scope of the win: the server-side cache cannot be saved/restored by a
+   local tool, so the post-eviction rebuild is unavoidable — compression makes it
+   *cheaper* (smaller prefix) and *lossless* (no LLM summary), it does not skip it.
 
 2. **Explicit SessionEnd (fast path, Req 2.3).** The `SessionEnd` hook runs
    `cozempic session-end`, which logs cost (Component A) then calls
@@ -369,7 +383,10 @@ always exit 0**:
 - **OPEN (Req 3.3)** — is `packaging/ci/publish.yml` an active workflow or
   documentation? If active, it must move to `.github/workflows/`. Resolve before
   implementing Component D.
-- **OPEN** — default cache-TTL idle window: 300s matches the 5-min cache TTL,
-  but a user on the 1-hr cache option may want `COZEMPIC_CACHE_TTL_SECONDS=3600`.
+- **Cache-TTL idle window** — DECIDED: auto-derive from the TTL mode
+  (`ENABLE_PROMPT_CACHING_1H` + subscription/API-key signal) → ~300s or ~3600s,
+  fired just *after* expiry; `COZEMPIC_CACHE_TTL_SECONDS` overrides. OPEN sub-item:
+  exact, reliable way to detect subscription (auto-1h) vs API-key billing from the
+  hook environment — needs confirmation.
 - **OPEN (Req 5.7)** — ship the publish-age window now or as a fast follow once
   the opt-in flip lands.

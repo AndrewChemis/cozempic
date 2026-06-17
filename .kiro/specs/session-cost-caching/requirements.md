@@ -113,10 +113,21 @@ the context window — the guard's hard1 tier), escalating prescriptions
 `gentle`-only trim is insufficient when the transcript already sits near the
 compaction threshold.
 
-2.2. WHEN no new user message has arrived within the prompt-cache TTL
-(configurable via `COZEMPIC_CACHE_TTL_SECONDS`, default 300s) after the last
-assistant turn AND the transcript is above target THEN compression SHALL fire.
-This is the **primary, exit-path-independent** trigger.
+2.2. WHEN no new activity has been written to the transcript for longer than the
+detected prompt-cache TTL AND the transcript is above target THEN compression
+SHALL fire. This is the **primary, exit-path-independent** trigger.
+
+2.2a. The idle threshold SHALL be **auto-derived from the cache-TTL mode**: the
+guard daemon SHALL inspect the environment (`ENABLE_PROMPT_CACHING_1H`, and the
+subscription-vs-API-key signal — subscriptions auto-use the 1-hour TTL) and set
+the threshold to ~300s (5-min mode) or ~3600s (1-hour mode). An explicit
+`COZEMPIC_CACHE_TTL_SECONDS` override SHALL win over auto-detection.
+
+2.2b. Compression SHALL fire **just after** the TTL elapses (threshold = TTL + a
+small margin), never before it. Rationale: pruning rewrites the prefix and
+invalidates the cache; firing before expiry would forfeit a still-warm 0.1× hit
+if the user resumes in the final second, for no benefit. Once the cache has
+expired there is nothing left to forfeit, and an idle session is in no hurry.
 
 2.3. WHEN an explicit `SessionEnd` event fires THEN compression SHALL also run
 immediately as a clean-exit fast path, without waiting out the idle timer.
