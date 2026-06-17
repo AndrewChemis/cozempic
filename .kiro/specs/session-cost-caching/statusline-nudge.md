@@ -3,7 +3,8 @@
 The one clearly-feasible, high-value feature to come out of this investigation.
 It replaces the unreliable Stop-hook `systemMessage` nudge (§0 of `future-work.md`)
 with the Claude Code **status line** — a first-class, reliably-rendered surface —
-and folds in the original cost-display ask (Requirement 1) at the same time.
+and shows a live running-cost segment at the same time (distinct from the
+session-cost *file* logging, which is its own PR — this is a visible widget).
 
 ## Why the status line
 

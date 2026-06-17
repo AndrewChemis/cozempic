@@ -45,7 +45,7 @@ compaction threshold. See `cost-analysis.md`.
 - Reads the hook payload from stdin (mirrors `cmd_nudge`,
   `src/cozempic/cli.py:1235`).
 - Resolves the transcript path from the payload; bails to exit 0 if missing /
-  unreadable (Requirement 1.7).
+  unreadable.
 - Loads messages once via `session.load_messages`.
 - Calls `compress.compress_to_target(path, messages, snapshot)`.
 - Always exits 0; every failure path is swallowed and (optionally) logged via

@@ -45,7 +45,8 @@ makes the message **model-visible** — it costs tokens and the model may *act* 
 
 The Stop-hook `systemMessage` channel is unreliable (§0). The **status line** is a
 first-class, reliably-rendered surface and is the better home for the nudge **and**
-the cost display (original Requirement 1) at once.
+a live cost display at once (the cost *display* is distinct from the session-cost
+*file* logging, which is its own PR).
 
 **Why it fits (corrected from the research agent's over-cautious verdict):** the
 agent flagged it "problematic" only because of #50679 — the status line is hidden
