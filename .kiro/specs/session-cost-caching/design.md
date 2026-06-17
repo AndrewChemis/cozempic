@@ -18,19 +18,32 @@ session and to slim a transcript that the next trigger will replay.
 ## Architecture
 
 ```
-Claude Code session ends
-        │  (stdin JSON: session_id, transcript_path, cwd, reason)
-        ▼
-SessionEnd hook  ──►  cozempic session-end
-                         │
-                         ├─ 1. read transcript ONCE (messages + costUSD/usage)
-                         ├─ 2. cost accounting  ──► ~/.claude/cozempic-metrics/session-costs.jsonl
-                         └─ 3. compression      ──► gentle prune, safe-write back to transcript
+TRIGGER A (primary): guard daemon notices                TRIGGER B (fast path):
+no new message for > cache TTL (default 300s)            explicit SessionEnd event
+        │                                                        │ stdin JSON:
+        │ (warm cache already expired → free to prune)           │ session_id, transcript_path,
+        ▼                                                        ▼ cwd, reason
+   compress_to_target(transcript)                        cozempic session-end
+        │                                                        │
+        │                                                        ├─ read transcript ONCE
+        │                                                        ├─ cost accounting ─► ~/.claude/
+        ▼                                                        │     cozempic-metrics/session-costs.jsonl
+   prune gentle→standard→aggressive  ◄───────────────────────────┘
+   only as far as needed to land ≤ target % of window;
+   safe-write back (PruneLock + snapshot conflict guard)
 ```
 
-Ordering is deliberate: cost is computed from the in-memory messages **before**
-the compression pass strips `costUSD`/`usage` (Requirement 2.8). A single load
-serves both steps.
+Ordering on the SessionEnd path is deliberate: cost is computed from the
+in-memory messages **before** the compression pass strips `costUSD`/`usage`
+(Requirement 2.10). A single load serves both steps. The idle path only
+compresses (cost is logged on the explicit-end path / by the daemon's own
+bookkeeping).
+
+**Why idle-past-TTL is the right moment.** The hook is free (0 model tokens),
+but a compaction event is not — it generates a ~12% summary at output rates plus
+a prefix read + re-cache. Pruning when the cache has *already* expired forfeits
+no warm hit, and the slimmer transcript keeps a later re-trigger under the
+compaction threshold. See `cost-analysis.md`.
 
 ### New CLI command: `session-end`
 
@@ -40,7 +53,7 @@ serves both steps.
   unreadable (Requirement 1.7).
 - Loads messages once via `session.load_messages`.
 - Calls `cost.record_session_cost(messages, payload)` then
-  `compress.compress_on_end(path, messages, snapshot)`.
+  `compress.compress_to_target(path, messages, snapshot)`.
 - Always exits 0; every failure path is swallowed and (optionally) logged via
   `COZEMPIC_DEBUG`, matching existing hook discipline.
 
@@ -101,34 +114,74 @@ def record_session_cost(messages, payload) -> None:
 `cost_usd` is `null` and `cost_source` is `"unavailable"` on subscription
 transcripts that carry no `costUSD`.
 
-### Component B — Compression (`src/cozempic/compress.py`, new thin wrapper)
+### Component B — Compression: prune-to-target (`src/cozempic/compress.py`, new)
 
-Reuses the existing prune pipeline rather than reimplementing it:
+Reuses the existing prune pipeline, but escalates prescriptions until the
+transcript lands under a target headroom rather than applying a fixed strength:
 
 ```python
-def compress_on_end(path, messages, snapshot) -> CompressResult:
+TARGET_PCT = 0.55   # land at/below the guard's hard1 tier (configurable)
+LADDER = ("gentle", "standard", "aggressive")
+
+def compress_to_target(path, messages, snapshot) -> CompressResult:
     if os.environ.get("COZEMPIC_SESSION_END_COMPRESS_OFF"):
         return CompressResult(skipped="opt-out")
-    if below_floor(messages):                       # Req 2.6
-        return CompressResult(skipped="below-floor")
-    new_messages, _ = run_prescription(messages, PRESCRIPTIONS["gentle"], {})
+    if below_floor(messages) or at_or_below_target(messages):   # Req 2.9
+        return CompressResult(skipped="already-small")
+    window = detect_context_window(messages)
+    target_tokens = int(window * target_pct())
+    new_messages = messages
+    for rx in LADDER:                                # Req 2.1 — escalate as needed
+        new_messages, _ = run_prescription(messages, PRESCRIPTIONS[rx], {})
+        if estimate_session_tokens(new_messages).total <= target_tokens:
+            break                                    # gentle is the floor; stop early
     try:
-        with _PruneLock(path):                      # Req 2.2/2.3
+        with _PruneLock(path):                       # Req 2.6/2.7
             save_messages(path, new_messages, create_backup=True, snapshot=snapshot)
     except PruneLockError:
         return CompressResult(skipped="locked")
     except PruneConflictError:
-        return CompressResult(skipped="changed-mid-write")  # Req 2.4
+        return CompressResult(skipped="changed-mid-write")
 ```
 
-- Prescription is fixed to `gentle` (Requirement 2.1) — `metadata-strip` +
-  file-history dedup. No thinking-block removal, no content drop, so resume
-  fidelity is preserved.
-- `snapshot` is taken in `cmd_session_end` before load, exactly as `cmd_treat`
-  does (`src/cozempic/cli.py:350`), to power append-conflict detection.
-- The benefit floor (Requirement 2.6) avoids creating a backup for a 3-message
-  session; suggested default ~50 KB transcript, overridable via
-  `COZEMPIC_SESSION_END_COMPRESS_MIN_BYTES`.
+- **Prune-to-target, not fixed-gentle** (Requirement 2.1): a 5% gentle trim on a
+  transcript already at ~90% of the window still gets compacted on the next
+  re-trigger — money/latency spent for nothing. Escalating only as far as needed
+  keeps the lightest touch that actually clears the compaction threshold.
+- `gentle` is the floor (always at least metadata-strip + file-history dedup);
+  `aggressive` is reached only when the session is genuinely huge.
+- Target defaults to 55% of the detected window (`detect_context_window`,
+  `src/cozempic/tokens.py:176`), overridable via
+  `COZEMPIC_SESSION_END_COMPRESS_TARGET_PCT`. This mirrors the guard's hard1
+  tier so the end-of-session prune lands where mid-session reloads already aim.
+- `snapshot` powers append-conflict detection exactly as `cmd_treat` does
+  (`src/cozempic/cli.py:350`).
+- Floor skip (`COZEMPIC_SESSION_END_COMPRESS_MIN_BYTES`, ~50 KB) avoids a backup
+  for a trivial session.
+
+### Component B2 — Triggers: idle-past-cache-TTL is primary
+
+Two trigger paths drive Component B; the idle one is primary because the doc
+research found `SessionEnd` is unreliable on `/exit` and `/clear`:
+
+1. **Idle-past-cache-TTL (primary, Req 2.2/2.4/2.5).** The guard daemon
+   (`cozempic guard --daemon`, already spawned at SessionStart and already
+   polling the transcript — `src/cozempic/guard.py`) gains an idle check: track
+   the last user/assistant activity timestamp; WHEN `now - last_activity >
+   COZEMPIC_CACHE_TTL_SECONDS` (default 300s) AND the transcript is above target
+   AND no work is in flight (`detect_in_flight`) THEN run `compress_to_target`.
+   The TTL gate is the key insight: once the prompt cache has expired there is
+   **no warm hit left to forfeit**, so pruning at that instant is downside-free
+   and pre-positions the next re-trigger to replay a slim prefix.
+
+2. **Explicit SessionEnd (fast path, Req 2.3).** The `SessionEnd` hook runs
+   `cozempic session-end`, which logs cost (Component A) then calls
+   `compress_to_target` immediately — no idle wait. Covers clean exits where the
+   event does fire.
+
+Both paths converge on the same `compress_to_target` + safe-write, so behaviour
+is identical regardless of which fires. The idle path means coverage never
+depends on `SessionEnd` firing (Req 2.5).
 
 ### Component C — Hook wiring (`src/cozempic/data/hooks.json` + `plugin/hooks/hooks.json`)
 
@@ -260,13 +313,22 @@ always exit 0**:
 
 ## Decisions & open questions
 
+- **Prune strength** — DECIDED: prune-to-target (escalate gentle→standard→
+  aggressive to land ≤ target % of window), not a fixed `gentle` trim. A fixed
+  gentle pass is wasted on a transcript already near the compaction threshold.
+  Target defaults to 55% (guard hard1 tier).
+- **Compression trigger** — DECIDED: idle-past-cache-TTL via the guard daemon is
+  the *primary* trigger; explicit `SessionEnd` is a fast path. The doc research
+  showed `SessionEnd` is unreliable on `/exit`/`/clear`, so coverage must not
+  depend on it. Pruning is timed to cache expiry so no warm hit is forfeited.
 - **Dollars vs tokens fallback** — DECIDED: record tokens + mark dollars
   unavailable rather than ship a price table now (Out of scope in requirements).
-- **One command vs two** — DECIDED: a single `session-end` command does both, on
-  one transcript load, so cost reads pre-compression fields.
+- **One command vs two** — DECIDED: a single `session-end` command does cost +
+  compress on one transcript load, so cost reads pre-compression fields.
 - **OPEN (Req 3.3)** — is `packaging/ci/publish.yml` an active workflow or
   documentation? If active, it must move to `.github/workflows/`. Resolve before
   implementing Component D.
-- **OPEN** — exact compression benefit floor default (50 KB proposed).
+- **OPEN** — default cache-TTL idle window: 300s matches the 5-min cache TTL,
+  but a user on the 1-hr cache option may want `COZEMPIC_CACHE_TTL_SECONDS=3600`.
 - **OPEN (Req 5.7)** — ship the publish-age window now or as a fast follow once
   the opt-in flip lands.

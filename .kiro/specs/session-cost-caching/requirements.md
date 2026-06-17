@@ -7,10 +7,12 @@ This spec covers three capabilities investigated together on branch
 
 1. **Session-end cost accounting** — on true session end, write the total cost
    of the session to a durable file outside the repository.
-2. **Cache-friendly session compression** — on true session end, run a
-   loss-light Cozempic prune so that future re-triggers (e.g. Claude Code on the
-   web) replay a slimmer transcript and pay less for prompt-cache creation and
-   per-turn cache reads.
+2. **Cache-aware session compression** — when an interactive session goes idle
+   past the prompt-cache TTL (or ends explicitly), run a Cozempic prune that
+   takes the transcript to a safe margin below the auto-compaction threshold, so
+   that a later re-trigger replays a slim prefix AND avoids a costly compaction
+   event. The trigger is timed to cache expiry: once the warm cache is forfeit,
+   pruning costs nothing and pre-positions a cheaper re-trigger.
 3. **Supply-chain hardening** — pin GitHub Actions and Python build tooling to
    immutable SHAs, and change the auto-update default from opt-out to opt-in so a
    compromised PyPI release cannot silently propagate to every user.
@@ -84,46 +86,67 @@ discipline (`digest._atomic_write_text`).
 
 ---
 
-## Requirement 2 — Cache-friendly session compression on session end
+## Requirement 2 — Cache-aware compression: triggers and prune-to-target
 
-**User story:** As a Claude Code on the web user, I want my session transcript
-slimmed when the session ends, so that each future re-trigger replays a smaller
-prefix and pays less for prompt-cache creation and per-turn cache reads.
+**User story:** As a Claude Code user, I want my transcript compressed when an
+interactive session goes idle past the prompt-cache TTL (or ends), so that if I
+later re-trigger, the replayed prefix is small and a costly compaction event is
+avoided. Because the warm cache is already gone at that point, pruning costs me
+nothing in forfeited cache hits.
+
+### Rationale — why this is economically sound
+
+A `SessionEnd`/idle hook adds **0 model tokens** (its stdout is not fed to the
+model — see `design.md` and `cost-analysis.md`). A compaction event is **not**
+free: it generates a summary ≈12% of the prefix at output rates, plus a prefix
+read and a re-cache, plus downstream rework from fidelity loss. So the unit of
+savings is an **avoided compaction event**, not marginal cache-read shavings —
+and since the trigger is free, there is no break-even to clear.
 
 ### Acceptance criteria
 
-2.1. WHEN a session ends THEN Cozempic SHALL run a compression pass over the
-on-disk transcript using a loss-light prescription (the `gentle` prescription:
-`metadata-strip` + file-history dedup) rather than a content-dropping aggressive
-prescription.
+2.1. WHEN compression runs THEN it SHALL prune the transcript to a configurable
+**target headroom below the auto-compaction threshold** (e.g. land at ≤55% of
+the context window — the guard's hard1 tier), escalating prescriptions
+`gentle → standard → aggressive` only as far as needed to reach the target, with
+`gentle` (metadata-strip + file-history dedup) as the **floor**. A fixed
+`gentle`-only trim is insufficient when the transcript already sits near the
+compaction threshold.
 
-2.2. WHEN compression runs THEN it SHALL reuse the existing safe-write path
+2.2. WHEN no new user message has arrived within the prompt-cache TTL
+(configurable via `COZEMPIC_CACHE_TTL_SECONDS`, default 300s) after the last
+assistant turn AND the transcript is above target THEN compression SHALL fire.
+This is the **primary, exit-path-independent** trigger.
+
+2.3. WHEN an explicit `SessionEnd` event fires THEN compression SHALL also run
+immediately as a clean-exit fast path, without waiting out the idle timer.
+
+2.4. WHILE a session is actively in use (a user message arrived within the cache
+TTL) THEN compression SHALL NOT fire, so an in-flight warm cache is never
+invalidated mid-conversation.
+
+2.5. WHERE `SessionEnd` does not fire reliably for an exit path (documented gaps
+on `/exit` and `/clear`) THEN the idle-timeout trigger (2.2) SHALL still
+compress the session, so coverage does not depend on `SessionEnd` firing.
+
+2.6. WHEN compression writes THEN it SHALL reuse the existing safe-write path
 (`save_messages` with `_PruneLock` and snapshot-based append-conflict
 detection) so a concurrent guard prune cannot corrupt the file.
 
-2.3. IF another prune cycle holds the per-session lock THEN compression SHALL
-abort cleanly (no write, exit 0) rather than block shutdown.
+2.7. IF another prune cycle holds the per-session lock, OR the transcript
+changed between snapshot and write (Claude appended new lines) THEN compression
+SHALL abort cleanly (no write, exit 0).
 
-2.4. IF the transcript changed between snapshot and write (Claude appended new
-lines) THEN compression SHALL abort without writing.
-
-2.5. WHEN compression succeeds THEN the system SHALL create a backup of the
+2.8. WHEN compression succeeds THEN the system SHALL create a backup of the
 pre-compression transcript consistent with `save_messages(create_backup=True)`.
 
-2.6. WHERE the session is below any benefit threshold (e.g. transcript smaller
-than a configurable floor) THEN compression SHALL be skipped to avoid needless
-backups on trivial sessions.
+2.9. WHERE the transcript is already at/below target, smaller than a configurable
+floor (`COZEMPIC_SESSION_END_COMPRESS_MIN_BYTES`), or the opt-out
+(`COZEMPIC_SESSION_END_COMPRESS_OFF`) is set THEN compression SHALL be skipped.
 
-2.7. WHERE a compression opt-out (`COZEMPIC_SESSION_END_COMPRESS_OFF`) is set
-THEN compression SHALL be skipped.
-
-2.8. WHEN compression strips exact-usage metadata THEN cost accounting
+2.10. WHEN compression strips exact-usage metadata THEN cost accounting
 (Requirement 1) SHALL read `costUSD`/usage **before** the compression pass runs,
 so the two steps do not race over the same fields.
-
-2.9. The design SHALL document the prompt-cache trade-off: compression reduces
-re-ingestion cost across re-triggers but invalidates any warm cross-trigger
-cache within the cache TTL; this is acceptable for sporadic re-triggers.
 
 ---
 

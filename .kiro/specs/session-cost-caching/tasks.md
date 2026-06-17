@@ -20,25 +20,37 @@ stays green between steps.
   duplicate-session no-op, opt-out env, unwritable-dir degrade, atomic-write
   crash-safety. _(Req 1.2–1.9)_
 
-## 2. Cache-friendly compression
+## 2. Cache-aware compression (prune-to-target + idle trigger)
 
-- [ ] 2.1 Create `src/cozempic/compress.py` with `compress_on_end(path,
-  messages, snapshot)` running the `gentle` prescription via `run_prescription`
-  and writing back through `_PruneLock` + `save_messages(create_backup=True,
-  snapshot=…)`. _(Req 2.1, 2.2, 2.5)_
-- [ ] 2.2 Handle `PruneLockError` and `PruneConflictError` as clean skips (no
-  write, exit 0); add the benefit-floor skip
-  (`COZEMPIC_SESSION_END_COMPRESS_MIN_BYTES`) and the
-  `COZEMPIC_SESSION_END_COMPRESS_OFF` opt-out. _(Req 2.3, 2.4, 2.6, 2.7)_
-- [ ] 2.3 Unit tests: shrink a bloated fixture, lock contention skip,
-  append-conflict skip, below-floor skip, backup created. _(Req 2.1–2.7)_
+- [ ] 2.1 Create `src/cozempic/compress.py` with `compress_to_target(path,
+  messages, snapshot)`: escalate `gentle → standard → aggressive` via
+  `run_prescription` only until `estimate_session_tokens` lands ≤
+  `target_pct × detect_context_window` (default 55%, env
+  `COZEMPIC_SESSION_END_COMPRESS_TARGET_PCT`), with `gentle` as the floor; write
+  back through `_PruneLock` + `save_messages(create_backup=True, snapshot=…)`.
+  _(Req 2.1, 2.6, 2.8)_
+- [ ] 2.2 Handle `PruneLockError`/`PruneConflictError` as clean skips; add the
+  already-at-target skip, benefit-floor skip
+  (`COZEMPIC_SESSION_END_COMPRESS_MIN_BYTES`), and the
+  `COZEMPIC_SESSION_END_COMPRESS_OFF` opt-out. _(Req 2.7, 2.9)_
+- [ ] 2.3 Add the **idle-past-cache-TTL** trigger to the guard daemon
+  (`src/cozempic/guard.py`): track last-activity timestamp; when `now -
+  last_activity > COZEMPIC_CACHE_TTL_SECONDS` (default 300s) AND above target AND
+  not `detect_in_flight`, call `compress_to_target`. Fire at most once per idle
+  episode (re-arm on new activity). _(Req 2.2, 2.4, 2.5)_
+- [ ] 2.4 Unit tests: ladder escalates only as far as needed (gentle suffices →
+  stops at gentle; huge session → reaches aggressive); already-at-target skip;
+  lock/append-conflict skips; below-floor skip; backup created. _(Req 2.1, 2.6–2.9)_
+- [ ] 2.5 Guard-daemon tests: idle past TTL fires once; new activity within TTL
+  re-arms and does NOT fire (warm cache preserved); in-flight work defers.
+  _(Req 2.2, 2.4)_
 
 ## 3. `session-end` command + hook wiring
 
 - [ ] 3.1 Add `cmd_session_end(args)` in `src/cozempic/cli.py`: read stdin
   payload, take `snapshot_session(path)`, `load_messages` once, call
-  `record_session_cost` THEN `compress_on_end` (cost first — Req 2.8), always
-  exit 0. _(Req 1.1, 1.7, 2.8)_
+  `record_session_cost` THEN `compress_to_target` (cost first — Req 2.10), always
+  exit 0. _(Req 1.1, 1.7, 2.3, 2.10)_
 - [ ] 3.2 Register the `session-end` subparser in `build_parser` and wire
   dispatch. _(Req 1.1)_
 - [ ] 3.3 Add a `SessionEnd` hook block to `src/cozempic/data/hooks.json` and
