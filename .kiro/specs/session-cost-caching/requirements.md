@@ -148,6 +148,37 @@ floor (`COZEMPIC_SESSION_END_COMPRESS_MIN_BYTES`), or the opt-out
 (Requirement 1) SHALL read `costUSD`/usage **before** the compression pass runs,
 so the two steps do not race over the same fields.
 
+### Resume backstop — pre-empt native compaction
+
+The principle: Claude's native auto-compaction is an **LLM summarization call**
+(output-rate tokens, lossy). Cozempic's prune is a **mechanical file operation**
+(zero LLM, structure-preserving). So instead of letting native compaction fire
+on a resumed-but-bloated session, Cozempic does the compaction itself, cheaper,
+before Claude's does.
+
+2.11. WHEN a session is resumed (Claude Code `SessionStart` hook, matcher
+`resume`) AND its persisted transcript is above the compaction target THEN
+Cozempic SHALL prune it to target as a backstop, so the resumed session loads
+slim and native auto-compaction does not fire.
+
+2.12. IF the resumed process has already ingested the un-pruned transcript by the
+time the `SessionStart` hook runs (so an in-place edit cannot affect the current
+context — the same constraint that makes Cozempic use `reload` today) THEN the
+backstop SHALL fall back to `guard --reload-self` to re-enter against the pruned
+transcript. The re-ingest is a cache-creation over the **smaller** pruned prefix
+(mechanical, no LLM), which SHALL be cheaper than native compaction summarizing
+the **larger** prefix.
+
+2.13. WHERE the resumed transcript is already at/below target (e.g. it was
+pruned at idle/SessionEnd) THEN the resume backstop SHALL no-op.
+
+2.14. The resume backstop SHALL key on `session_id` so it acts only on a genuine
+resume of the same session, never on a fresh `startup`.
+
+2.15. The resume backstop SHALL honour the same opt-out
+(`COZEMPIC_SESSION_END_COMPRESS_OFF`) and safe-write guards
+(`_PruneLock`, snapshot conflict) as the idle/SessionEnd path.
+
 ---
 
 ## Requirement 3 — Pin GitHub Actions to immutable SHAs

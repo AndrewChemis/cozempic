@@ -86,6 +86,24 @@ This is why the **idle-past-TTL daemon trigger is primary** and `SessionEnd` is
 only a clean-exit fast path — the doc research also found `SessionEnd` fires
 unreliably on `/exit` and `/clear`, so coverage cannot depend on it.
 
+## Doing the compaction ourselves (resume backstop)
+
+The same asymmetry powers the resume backstop. Native compaction is an LLM
+summarization (output-rate tokens, lossy); a Cozempic prune is a mechanical file
+op (0 LLM, structure-preserving). On resume of a bloated session we therefore
+prune to target ourselves *before* native auto-compaction would fire:
+
+| | Native auto-compaction | Cozempic prune + reload |
+| --- | --- | --- |
+| What runs | LLM summary ≈12% of the **large** prefix | mechanical strip/dedup, no LLM |
+| Token cost | output-rate summary + prefix read + re-cache | cache-creation over the **small** pruned prefix |
+| Fidelity | lossy paraphrase | structure preserved (drops redundancy) |
+
+Either way the mechanical prune is cheaper than the LLM compaction. The open
+question (which `cost.compress_to_target` branch is the common case) is only
+*how* we apply it on resume — in place if the hook runs before ingestion, else
+`guard --reload-self` — not *whether* it is cheaper.
+
 ## Cost-logging half
 
 Pure upside: reads per-message `costUSD` (or token usage when absent) and appends

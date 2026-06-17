@@ -183,6 +183,47 @@ Both paths converge on the same `compress_to_target` + safe-write, so behaviour
 is identical regardless of which fires. The idle path means coverage never
 depends on `SessionEnd` firing (Req 2.5).
 
+### Component B3 — Resume backstop: do the compaction ourselves (Req 2.11–2.15)
+
+Wires into the **existing** `SessionStart` hook (`src/cozempic/data/hooks.json:9`
++ mirror), which already runs on resume and already contains the
+`guard --reload-self` machinery (used today on the auto-update version-change
+path). On `SessionStart` with matcher `resume` for a transcript above target:
+
+```
+SessionStart(resume), same session_id
+        │
+        ├─ transcript ≤ target?  ──► no-op (already pruned at idle/SessionEnd)   # Req 2.13
+        │
+        └─ above target ──► compress_to_target(transcript)                        # Req 2.11
+                                   │
+                                   ├─ hook runs BEFORE ingestion ──► Claude loads slim file. Done.
+                                   └─ hook runs AFTER ingestion  ──► guard --reload-self           # Req 2.12
+                                          re-enter against pruned file (small mechanical
+                                          cache-creation) instead of native compaction
+                                          (LLM summary over the large prefix)
+```
+
+**Why this is cheaper either way** (see `cost-analysis.md`): native compaction
+spends an output-rate summary ≈12% of the *large* prefix plus rework. The reload
+fallback spends a cache-creation (1.25×) over the *already-pruned, smaller*
+prefix and no LLM summary. Mechanical prune < LLM compaction, always.
+
+**Sequencing — the one thing to confirm.** Whether the `SessionStart(resume)`
+hook fires before or after Claude ingests the transcript decides which branch is
+the common case. The design works either way (in-place when before;
+`reload-self` when after), but the answer tunes the default. This is the single
+open question gating Component B3 — resolve from docs before implementing. The
+existing reload-self auto-update path strongly implies "after" (you can't mutate
+an already-loaded context without re-entry), which is why `reload-self` is the
+safe default.
+
+**Relationship to idle/SessionEnd prune.** End-of-interaction pruning is primary;
+the resume backstop is the guarantee. If end-time pruning ran, the resume check
+no-ops (Req 2.13). If it didn't (the `/exit`, `/clear`, or container-killed
+gaps), the backstop ensures the resumed session still never hits native
+compaction.
+
 ### Component C — Hook wiring (`src/cozempic/data/hooks.json` + `plugin/hooks/hooks.json`)
 
 Add a new `SessionEnd` block (both files are kept byte-identical by

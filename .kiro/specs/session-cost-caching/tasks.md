@@ -44,6 +44,15 @@ stays green between steps.
 - [ ] 2.5 Guard-daemon tests: idle past TTL fires once; new activity within TTL
   re-arms and does NOT fire (warm cache preserved); in-flight work defers.
   _(Req 2.2, 2.4)_
+- [ ] 2.6 **Resume backstop**: in the existing `SessionStart` hook, when matcher
+  is `resume` for the same `session_id` and the transcript is above target, run
+  `compress_to_target`; if the process already ingested the un-pruned transcript,
+  escalate to `guard --reload-self` against the pruned file. No-op when already
+  at/below target. Honour the shared opt-out + safe-write guards.
+  _(Req 2.11–2.15)_ — **BLOCKED on resolving hook-vs-ingestion ordering (research).**
+- [ ] 2.7 Resume-backstop tests: above-target resume prunes; already-small resume
+  no-ops; `startup` (not resume) does not trigger; reload-self fallback invoked
+  when configured. _(Req 2.11–2.14)_
 
 ## 3. `session-end` command + hook wiring
 
