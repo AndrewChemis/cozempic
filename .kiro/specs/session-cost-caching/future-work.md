@@ -130,7 +130,7 @@ at the prompt — wrong moment for a reload nudge. Dead end for a CLI/plugin.
 
 Biggest payoff for least work:
 1. **`cozempic statusline`** (the recommended primary surface) — it simultaneously
-   fixes the broken nudge (§0), delivers the cost display (Req 1), and carries the
+   fixes the broken nudge (§0), delivers a live cost display, and carries the
    context-% + cache-miss signals, all from the status-line payload. Highest leverage.
 2. **#1 (doctor TTL check)** + **#2 (post-idle miss detector)** for scenario B.
 3. **#3 (advisor)** for scenario A — its output now has a reliable home (the status line).
