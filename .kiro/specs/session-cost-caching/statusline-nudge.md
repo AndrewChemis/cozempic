@@ -69,10 +69,22 @@ mutation required to render).
 
 ### Integration with `ccstatusline` (the popular status-line tool)
 
-Many users already run **ccstatusline** as their `statusLine.command`. Cozempic
-SHALL integrate with it rather than clobber it, and fall back to standalone only
-when it is absent. (Exact widget mechanism/config path pending research agent
-`a77a5f5…`; the contract below holds regardless.)
+Many users already run **ccstatusline** (sirmalloc/ccstatusline, MIT, wired as
+`statusLine.command: npx -y ccstatusline@latest`). Cozempic SHALL integrate with it
+rather than clobber it, and fall back to standalone only when it is absent.
+
+**Confirmed mechanism** (github.com/sirmalloc/ccstatusline, docs/USAGE.md):
+- ccstatusline has a **`Custom Command`** widget — runs a shell command on every
+  refresh, passes the **full Claude Code status JSON on stdin** (plus a
+  `terminal_width` field), renders stdout inline, kills on `timeout` (default
+  1000ms), preserves ANSI when `preserveColors: true`.
+- Config at `~/.config/ccstatusline/settings.json` (honors `CLAUDE_CONFIG_DIR`),
+  externally JSON-editable (TUI optional), atomic saves, leaves file untouched if
+  invalid. Schema: `{ lines: [ { widgets: [ {type, metadata, foregroundColor,…} ],
+  padding, separator } ], …globals }`. No published JSON schema (inferred from TS types).
+- ccstatusline already ships **Context %, Session Cost, Cache Read/Write, Cache Hit
+  Rate, Compaction Counter** widgets — so Cozempic must contribute ONLY the nudge,
+  not duplicate these.
 
 R11. `cozempic init --statusline` SHALL **detect ccstatusline** (e.g. the
 `statusLine.command` in `~/.claude/settings.json` references `ccstatusline`, or its
@@ -90,10 +102,24 @@ NOT duplicate context%/cost segments that ccstatusline already provides. A
 custom-command widget. (Standalone mode still renders the full context% + cost + nudge.)
 
 R13. WHERE Cozempic edits ccstatusline's config THEN the write SHALL be atomic,
-reversible, and idempotent (re-running init does not add duplicate widgets), and
-SHALL never corrupt or reorder the user's existing widgets. IF the config schema is
-unknown/unsupported THEN init SHALL fall back to printing manual instructions rather
-than editing blindly.
+reversible, and idempotent (re-running init does not add duplicate widgets — detect
+an existing Cozempic widget by its command), and SHALL never corrupt or reorder the
+user's existing widgets. IF the config is missing/invalid/unrecognized THEN init
+SHALL fall back to printing manual instructions rather than editing blindly.
+
+R14. The widget registered SHALL invoke the **installed binary** — `cozempic
+statusline --segment nudge` (NOT `npx cozempic`; cozempic is a PyPI/Python package),
+with metadata `{ "timeout": 2000, "preserveColors": true, "maxWidth": 40 }` and a
+warning-color default. `cozempic init --uninstall-statusline` SHALL remove exactly
+that widget.
+
+R15. **Performance** — the segment command runs on EVERY status-line refresh under a
+~1–2s timeout, so cold-start matters. `cozempic statusline` SHALL minimize import/
+startup cost (lazy imports, no auto-init, no network, prefer the supplied
+`used_percentage`/`cost` over re-reading the transcript) and exit fast; if it risks
+exceeding the budget it SHALL still print a best-effort/empty line rather than hang.
+Detection (R11) SHALL key on `statusLine.command` containing `ccstatusline` and/or the
+presence of `~/.config/ccstatusline/settings.json`.
 
 ## Design
 
@@ -114,12 +140,22 @@ than editing blindly.
 - **`init --statusline`**: read `~/.claude/settings.json` (honoring `CLAUDE_CONFIG_DIR`),
   detect `statusLine`, prompt to wrap-or-set, write atomically (reuse existing atomic
   settings writer). Add to `cozempic doctor` a check that the status line is wired.
-- **ccstatusline branch** (R11–R13): detect ccstatusline (by `statusLine.command`
-  substring and/or its config file), and when present add a custom-command widget
-  pointing at `cozempic statusline --segment nudge` to ccstatusline's config — atomic,
-  idempotent, reversible; fall back to printed manual instructions if the schema is
-  unrecognized. Three install outcomes total: (a) integrate into ccstatusline,
+- **ccstatusline branch** (R11–R15): detect ccstatusline (by `statusLine.command`
+  substring and/or `~/.config/ccstatusline/settings.json`), and when present insert a
+  `Custom Command` widget into the primary line's `widgets` array:
+  ```json
+  { "type": "Custom Command",
+    "metadata": { "command": "cozempic statusline --segment nudge",
+                  "timeout": 2000, "preserveColors": true, "maxWidth": 40 },
+    "foregroundColor": "yellow" }
+  ```
+  Atomic + idempotent (skip if a widget with that command exists) + reversible
+  (`--uninstall-statusline`); printed manual instructions if the config is
+  invalid/unrecognized. Three install outcomes total: (a) integrate into ccstatusline,
   (b) standalone `cozempic statusline`, (c) `--wrap` an existing custom command.
+- **Cold-start budget** (R15): the segment runs under ccstatusline's ~1–2s timeout on
+  every refresh — keep `cozempic statusline` import-light (lazy imports, no auto-init,
+  no network) and prefer the stdin `used_percentage`/`cost` over reading the transcript.
 - **`--segment <name>`**: render a single named segment (`nudge`, `context`, `cost`,
   `cache`) so Cozempic can be embedded as a widget without duplicating what the host
   status line already shows.
