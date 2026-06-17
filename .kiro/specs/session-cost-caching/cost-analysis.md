@@ -104,6 +104,34 @@ question (which `cost.compress_to_target` branch is the common case) is only
 *how* we apply it on resume — in place if the hook runs before ingestion, else
 `guard --reload-self` — not *whether* it is cheaper.
 
+## Common misconception: compaction is a cache MISS, not a HIT
+
+A locally-compacted transcript does **not** earn a cache hit. A hit requires the
+prefix to **exactly match** a live server-side cache entry; compaction *changes*
+the prefix, which guarantees a **miss** (a cache write). So pruning does not
+*avoid* the rebuild charge — it makes the **unavoidable** rebuild **cheaper**
+(fewer tokens reprocessed) and lossless (no LLM summary). The only thing that
+truly avoids the charge is sending the identical prefix while the cache is still
+warm (resume before expiry / the 1-hour TTL) — the opposite of compacting.
+
+Three distinct cost events, often blended into one:
+
+| Event | Fires when | Cost |
+| --- | --- | --- |
+| Cache rebuild (reprocess prefix) | ANY resume after TTL expiry, at any context % | 1.25×/2.0× input over the prefix |
+| Native LLM compaction | only near the context **limit** (~90%+) | output-rate summary ≈12% of prefix |
+| Local prune ("pre-compaction") | whenever we choose | free, mechanical, no LLM |
+
+In a 50%-context / idle / resume scenario there is **no native compaction** — the
+only cost is the cache rebuild; compaction-avoidance is a bonus reserved for
+near-full sessions.
+
+**Billing reframe.** On a Claude **subscription**, usage is plan-inclusive (no
+per-token charges) and the TTL is 1 hour, so the dollar value here is ~nil — the
+win is **latency** and not overflowing into billed usage credits (which also drop
+you to the 5-min TTL). Real **dollar** savings concentrate on **API-key /
+Bedrock / Vertex** billing (per-token, 5-min default).
+
 ## Cost-logging half
 
 Pure upside: reads per-message `costUSD` (or token usage when absent) and appends
