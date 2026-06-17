@@ -40,9 +40,17 @@ stays green between steps.
   `now - last_activity > threshold + ε` (fire *after* expiry, never before) AND
   above target AND not `detect_in_flight`, call `compress_to_target`. Fire at most
   once per idle episode (re-arm on new activity). _(Req 2.2, 2.2a, 2.2b, 2.4, 2.5)_
-- [ ] 2.3a Add a TTL-mode detector helper + unit tests: `ENABLE_PROMPT_CACHING_1H`
-  truthy → 3600s; API-key billing → 300s; subscription → 3600s; explicit
-  `COZEMPIC_CACHE_TTL_SECONDS` always wins. _(Req 2.2a)_
+- [ ] 2.3a Add a TTL-mode detector helper + unit tests implementing the Req 2.2a
+  precedence: `COZEMPIC_CACHE_TTL_SECONDS` > `FORCE_PROMPT_CACHING_5M` (300s) >
+  `DISABLE_PROMPT_CACHING*` (off) > subscription (3600s) > API-key +
+  `ENABLE_PROMPT_CACHING_1H` (3600s) > API-key default (300s). Uncertain →
+  default 3600s (safe). Assert telemetry/privacy vars (`DISABLE_TELEMETRY`,
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `DO_NOT_TRACK`,
+  `COZEMPIC_NO_TELEMETRY`) are ignored. _(Req 2.2a, 2.2c, 2.2e)_
+- [ ] 2.3b (Enhancement) Empirical TTL measurement from transcript `usage`
+  (cache_read vs cache_creation across turn gaps); prefer measured value over env
+  inference when available. Covers plan-overage/subagent/#46829 silent downgrades.
+  _(Req 2.2d)_
 - [ ] 2.4 Unit tests: ladder escalates only as far as needed (gentle suffices →
   stops at gentle; huge session → reaches aggressive); already-at-target skip;
   lock/append-conflict skips; below-floor skip; backup created. _(Req 2.1, 2.6–2.9)_

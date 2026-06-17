@@ -117,11 +117,37 @@ compaction threshold.
 detected prompt-cache TTL AND the transcript is above target THEN compression
 SHALL fire. This is the **primary, exit-path-independent** trigger.
 
-2.2a. The idle threshold SHALL be **auto-derived from the cache-TTL mode**: the
-guard daemon SHALL inspect the environment (`ENABLE_PROMPT_CACHING_1H`, and the
-subscription-vs-API-key signal — subscriptions auto-use the 1-hour TTL) and set
-the threshold to ~300s (5-min mode) or ~3600s (1-hour mode). An explicit
-`COZEMPIC_CACHE_TTL_SECONDS` override SHALL win over auto-detection.
+2.2a. The idle threshold SHALL be **auto-derived from the cache-TTL mode** using
+this precedence (highest first), per the official prompt-caching docs:
+  1. `COZEMPIC_CACHE_TTL_SECONDS` (explicit user override) — wins over all below.
+  2. `FORCE_PROMPT_CACHING_5M=1` → 5-min mode (~300s), any auth incl. subscription.
+  3. `DISABLE_PROMPT_CACHING[_OPUS|_SONNET|_HAIKU|_FABLE]=1` → caching off; the
+     cache-forfeit concern is moot, but the idle prune MAY still run to pre-empt
+     native compaction and slim the reload.
+  4. Claude subscription auth → 1-hour mode (~3600s, automatic, free).
+  5. API key / Bedrock / Vertex / Foundry with `ENABLE_PROMPT_CACHING_1H=1` →
+     1-hour (~3600s). (`ENABLE_PROMPT_CACHING_1H` has no effect on subscription.)
+  6. API key / third-party default → 5-min mode (~300s).
+
+2.2c. WHERE the TTL mode cannot be positively determined THEN the threshold SHALL
+default to the **longer (1-hour)** window. Firing too late merely delays
+pre-positioning (safe); firing too early — assuming 5-min when the real TTL is
+1-hour — would prune while the cache is still warm and forfeit 0.1× hits.
+Over-estimating the TTL is the safe error direction.
+
+2.2d. The detector SHALL account for documented silent downgrades that env vars
+do NOT signal: (a) a subscription over its plan limit drawing on usage credits
+drops to 5-min; (b) subagent contexts use 5-min even on a subscription; (c)
+reported server-side TTL changes (e.g. issue #46829, unverified). Because env
+inference is therefore best-effort, an enhancement (Req 2.2c default keeps it
+safe meanwhile) is to **measure the effective TTL empirically** from transcript
+`usage` (cache_read vs cache_creation across turn gaps) and prefer the measured
+value.
+
+2.2e. Telemetry / privacy env vars (`DISABLE_TELEMETRY`,
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `DO_NOT_TRACK`, and Cozempic's own
+`COZEMPIC_NO_TELEMETRY`) SHALL NOT be used as caching signals — per docs they do
+not affect prompt caching or the TTL.
 
 2.2b. Compression SHALL fire **just after** the TTL elapses (threshold = TTL + a
 small margin), never before it. Rationale: pruning rewrites the prefix and

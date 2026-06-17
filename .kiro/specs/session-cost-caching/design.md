@@ -169,12 +169,23 @@ research found `SessionEnd` is unreliable on `/exit` and `/clear`:
    polling the transcript — `src/cozempic/guard.py`) gains an idle check that
    tracks last-activity (transcript mtime / last main-chain message).
 
-   - **Auto-derive the threshold from the cache-TTL mode** (Req 2.2a): inspect
-     `ENABLE_PROMPT_CACHING_1H` and the subscription-vs-API-key signal
-     (subscriptions auto-use the 1-hour TTL) → threshold ≈ 300s or ≈ 3600s.
-     `COZEMPIC_CACHE_TTL_SECONDS` overrides. The two TTL modes differ in *write*
-     price (1.25× at 5-min, 2.0× at 1-hour; reads are 0.1× for both), which is
-     why the wait must match the mode rather than a fixed constant.
+   - **Auto-derive the threshold from the cache-TTL mode** (Req 2.2a) by the
+     documented precedence: `COZEMPIC_CACHE_TTL_SECONDS` > `FORCE_PROMPT_CACHING_5M`
+     (→5-min) > `DISABLE_PROMPT_CACHING*` (off) > subscription auth (→1-hour,
+     automatic/free) > API-key + `ENABLE_PROMPT_CACHING_1H` (→1-hour) > API-key
+     default (→5-min). The modes differ in *write* price (1.25× at 5-min, 2.0× at
+     1-hour; reads 0.1× both), so the wait must match the mode.
+   - **Safe default = the LONGER window** (Req 2.2c): when the mode is uncertain,
+     assume 1-hour. Firing too early (assume 5-min, real 1-hour) prunes a still-warm
+     cache and forfeits 0.1× hits; firing too late only delays the benefit. The
+     known silent downgrades (plan-overage→credits, subagents, the reported
+     #46829 regression) aren't visible in env, so the robust enhancement is to
+     **measure the effective TTL** from transcript `usage` (cache_read vs
+     cache_creation across turn gaps) rather than trust env alone (Req 2.2d).
+   - **Telemetry/privacy vars are NOT caching signals** (Req 2.2e):
+     `DISABLE_TELEMETRY`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`,
+     `DO_NOT_TRACK`, `COZEMPIC_NO_TELEMETRY` — docs confirm they don't affect the
+     cache, so the detector must ignore them.
    - **Fire just after expiry, never before** (Req 2.2b): WHEN
      `now - last_activity > threshold + ε` AND transcript above target AND no
      work in flight (`detect_in_flight`) THEN run `compress_to_target`. Pruning
@@ -383,10 +394,13 @@ always exit 0**:
 - **OPEN (Req 3.3)** — is `packaging/ci/publish.yml` an active workflow or
   documentation? If active, it must move to `.github/workflows/`. Resolve before
   implementing Component D.
-- **Cache-TTL idle window** — DECIDED: auto-derive from the TTL mode
-  (`ENABLE_PROMPT_CACHING_1H` + subscription/API-key signal) → ~300s or ~3600s,
-  fired just *after* expiry; `COZEMPIC_CACHE_TTL_SECONDS` overrides. OPEN sub-item:
-  exact, reliable way to detect subscription (auto-1h) vs API-key billing from the
-  hook environment — needs confirmation.
+- **Cache-TTL idle window** — DECIDED (verified against official docs): auto-derive
+  by the precedence in Req 2.2a, fire just *after* expiry, default to the LONGER
+  window when uncertain (safe error direction), ignore telemetry/privacy vars.
+  Confirmed: subscription auth = automatic free 1-hour TTL;
+  `FORCE_PROMPT_CACHING_5M` downgrades any auth; plan-overage/subagents silently
+  use 5-min. OPEN sub-items: (a) exact subscription-vs-API-key detection from the
+  hook env; (b) whether to ship the empirical TTL-measurement enhancement (Req
+  2.2d) now or rely on the safe 1-hour default first.
 - **OPEN (Req 5.7)** — ship the publish-age window now or as a fast follow once
   the opt-in flip lands.
