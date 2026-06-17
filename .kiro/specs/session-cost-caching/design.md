@@ -1,4 +1,4 @@
-# Design — Session-End Cost Accounting, Cache-Friendly Compression & Supply-Chain Hardening
+# Design — Cache-Aware Compression & Supply-Chain Hardening
 
 ## Overview
 
@@ -25,19 +25,14 @@ no new message for > cache TTL (default 300s)            explicit SessionEnd eve
         ▼                                                        ▼ cwd, reason
    compress_to_target(transcript)                        cozempic session-end
         │                                                        │
-        │                                                        ├─ read transcript ONCE
-        │                                                        ├─ cost accounting ─► ~/.claude/
-        ▼                                                        │     cozempic-metrics/session-costs.jsonl
+        ▼                                                        ▼
    prune gentle→standard→aggressive  ◄───────────────────────────┘
    only as far as needed to land ≤ target % of window;
    safe-write back (PruneLock + snapshot conflict guard)
 ```
 
-Ordering on the SessionEnd path is deliberate: cost is computed from the
-in-memory messages **before** the compression pass strips `costUSD`/`usage`
-(Requirement 2.10). A single load serves both steps. The idle path only
-compresses (cost is logged on the explicit-end path / by the daemon's own
-bookkeeping).
+(Cost logging is no longer part of this command — it moved to the separate
+`claude/session-cost-logging` PR. Both triggers now do compression only.)
 
 **Why idle-past-TTL is the right moment.** The hook is free (0 model tokens),
 but a compaction event is not — it generates a ~12% summary at output rates plus
@@ -52,8 +47,7 @@ compaction threshold. See `cost-analysis.md`.
 - Resolves the transcript path from the payload; bails to exit 0 if missing /
   unreadable (Requirement 1.7).
 - Loads messages once via `session.load_messages`.
-- Calls `cost.record_session_cost(messages, payload)` then
-  `compress.compress_to_target(path, messages, snapshot)`.
+- Calls `compress.compress_to_target(path, messages, snapshot)`.
 - Always exits 0; every failure path is swallowed and (optionally) logged via
   `COZEMPIC_DEBUG`, matching existing hook discipline.
 
@@ -65,54 +59,10 @@ command (no positional `session` arg) so it cannot be confused with `treat`.
 
 ## Components and interfaces
 
-### Component A — Cost accounting (`src/cozempic/cost.py`, new)
+### Component A — Cost accounting → MOVED
 
-```python
-METRICS_DIR = Path.home() / ".claude" / "cozempic-metrics"
-COST_FILE   = METRICS_DIR / "session-costs.jsonl"
-
-def compute_cost(messages) -> CostResult:
-    """Sum per-message costUSD; fall back to token usage when absent."""
-
-def record_session_cost(messages, payload) -> None:
-    """Compute + append one JSONL record. Idempotent per session_id. No-op on opt-out."""
-```
-
-- `costUSD` lives on the outer message object (it is in `gentle`'s
-  `strip_outer` set, `src/cozempic/strategies/gentle.py:241`). Sum it across all
-  messages that carry it.
-- When absent, pull `extract_usage_tokens(messages)`
-  (`src/cozempic/tokens.py:254`) and `detect_model(messages)` and set
-  `cost_usd = null`, `cost_source = "unavailable"`.
-- Idempotency (Requirement 1.6): before appending, scan the tail of
-  `session-costs.jsonl` for an existing record with the same `session_id`; skip
-  if found. (Tail scan is cheap; the file is one short line per session.)
-- Opt-out (Requirement 1.8): return early if `COZEMPIC_COST_LOG_OFF` or
-  `COZEMPIC_NO_TELEMETRY` is set. (This file is local-only, never transmitted —
-  `NO_TELEMETRY` is honoured as a courtesy for users who want zero side files.)
-- Atomic append: write via a tmp-file rewrite (read existing + append +
-  `_atomic_write_text`) reusing `digest._atomic_write_text` semantics, OR an
-  `O_APPEND` write under a short-lived lock. Given the file is tiny and writes
-  are rare (once per session), read-modify-atomic-replace is simplest and
-  crash-safe.
-
-#### Record schema (`session-costs.jsonl`, one JSON object per line)
-
-```json
-{
-  "session_id": "abc123…",
-  "project": "/home/user/cozempic",
-  "ended_at": "2026-06-17T12:34:56+00:00",
-  "reason": "clear",
-  "cost_usd": 0.4213,
-  "cost_source": "costUSD",
-  "tokens_total": 187432,
-  "model": "claude-opus-4-8"
-}
-```
-
-`cost_usd` is `null` and `cost_source` is `"unavailable"` on subscription
-transcripts that carry no `costUSD`.
+Split out to `claude/session-cost-logging` (`.kiro/specs/session-cost-logging/spec.md`).
+Not part of this design.
 
 ### Component B — Compression: prune-to-target (`src/cozempic/compress.py`, new)
 
@@ -200,9 +150,8 @@ research found `SessionEnd` is unreliable on `/exit` and `/clear`:
    *cheaper* (smaller prefix) and *lossless* (no LLM summary), it does not skip it.
 
 2. **Explicit SessionEnd (fast path, Req 2.3).** The `SessionEnd` hook runs
-   `cozempic session-end`, which logs cost (Component A) then calls
-   `compress_to_target` immediately — no idle wait. Covers clean exits where the
-   event does fire.
+   `cozempic session-end`, which calls `compress_to_target` immediately — no idle
+   wait. Covers clean exits where the event does fire.
 
 Both paths converge on the same `compress_to_target` + safe-write, so behaviour
 is identical regardless of which fires. The idle path means coverage never
@@ -336,11 +285,11 @@ fetched by `_get_latest_version`'s endpoint.
 
 | Artifact | Location | Lifetime |
 | --- | --- | --- |
-| `session-costs.jsonl` | `~/.claude/cozempic-metrics/` | persistent, append-only |
 | compressed transcript | Claude Code project dir (in place) | overwrites, with `.bak` |
 | nudge/metrics state | `~/.claude/cozempic-metrics/` (existing) | unchanged |
 
-No new on-disk format beyond the JSONL record schema above.
+No new on-disk format. (`session-costs.jsonl` belongs to the separate
+session-cost-logging feature.)
 
 ---
 
@@ -353,24 +302,18 @@ always exit 0**:
 - Unreadable/missing transcript → return without writing.
 - Metrics dir unwritable (read-only FS, quota) → swallow, optional
   `COZEMPIC_DEBUG` stderr line.
-- Compression lock contended or mid-write conflict → skip the prune, still write
-  cost; transcript left untouched.
+- Compression lock contended or mid-write conflict → skip the prune; transcript
+  left untouched.
 - Network failure in the auto-update notice → silent (existing behaviour).
 
 ---
 
 ## Testing strategy
 
-- **cost.py**: `costUSD` summation; subscription fallback (usage-only →
-  `cost_usd=null`); idempotency on duplicate `session_id`; opt-out env;
-  unwritable dir degrades silently; atomic-write crash-safety (reuse the
-  `endswith`-patch pattern from `tests/test_atomic_writes_wave1.py`).
 - **compress.py**: gentle prune shrinks a bloated fixture
   (`tests/fixtures/sessions/solo_bloated.jsonl`); lock contention → skip;
   append-conflict (snapshot mismatch) → no write; below-floor → skip; backup
   created on success.
-- **ordering**: cost is recorded with non-null `costUSD` even though the
-  subsequent compression strips `costUSD` (Requirement 2.8).
 - **hooks sync**: extend `tests/test_hooks_sync.py` so the new `SessionEnd`
   block stays identical across `data/hooks.json` and `plugin/hooks/hooks.json`,
   and the schema marker bump is asserted.
@@ -394,8 +337,9 @@ always exit 0**:
   depend on it. Pruning is timed to cache expiry so no warm hit is forfeited.
 - **Dollars vs tokens fallback** — DECIDED: record tokens + mark dollars
   unavailable rather than ship a price table now (Out of scope in requirements).
-- **One command vs two** — DECIDED: a single `session-end` command does cost +
-  compress on one transcript load, so cost reads pre-compression fields.
+- **Cost logging split out** — DECIDED: session-end cost-to-file is now a separate
+  feature (`claude/session-cost-logging`); this `session-end` command does
+  compression only.
 - **OPEN (Req 3.3)** — is `packaging/ci/publish.yml` an active workflow or
   documentation? If active, it must move to `.github/workflows/`. Resolve before
   implementing Component D.

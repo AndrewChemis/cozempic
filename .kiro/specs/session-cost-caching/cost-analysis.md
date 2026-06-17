@@ -132,17 +132,17 @@ win is **latency** and not overflowing into billed usage credits (which also dro
 you to the 5-min TTL). Real **dollar** savings concentrate on **API-key /
 Bedrock / Vertex** billing (per-token, 5-min default).
 
-## Cost-logging half
+## Cost-logging (split out)
 
-Pure upside: reads per-message `costUSD` (or token usage when absent) and appends
-one line to `~/.claude/cozempic-metrics/session-costs.jsonl`. 0 model tokens, no
-re-trigger dependency, no downside.
+The session-end cost-to-file idea is now a separate feature/PR
+(`claude/session-cost-logging`). It's pure upside (0 model tokens, no re-trigger
+dependency) but unrelated to the cache economics analyzed here.
 
 ## When it does NOT help
 
 - A session that is genuinely one-and-done and never resumed: compression saves
   no tokens (nothing replays it). The only "waste" is a sub-second rewrite + one
-  `.bak`. Cost-logging is still free upside.
+  `.bak`.
 - Two re-triggers *within* the cache TTL: the idle trigger intentionally won't
   have fired yet, so the warm cache is preserved — correct behaviour.
 

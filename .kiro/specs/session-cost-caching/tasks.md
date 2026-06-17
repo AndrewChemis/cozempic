@@ -1,24 +1,13 @@
-# Tasks — Session-End Cost Accounting, Cache-Friendly Compression & Supply-Chain Hardening
+# Tasks — Cache-Aware Compression & Supply-Chain Hardening
 
 Implementation plan. Each task lists the requirement IDs it satisfies. Check off
 as completed. Tasks are ordered so each builds on the previous and the tree
 stays green between steps.
 
-## 1. Cost accounting core
+## 1. Cost accounting core → MOVED
 
-- [ ] 1.1 Create `src/cozempic/cost.py` with `METRICS_DIR`/`COST_FILE`
-  constants, a `CostResult` dataclass, and `compute_cost(messages)` that sums
-  per-message `costUSD` and falls back to `extract_usage_tokens` +
-  `detect_model` when absent. _(Req 1.2, 1.3)_
-- [ ] 1.2 Add `record_session_cost(messages, payload)`: build the JSONL record
-  (schema in design.md), honour `COZEMPIC_COST_LOG_OFF` / `COZEMPIC_NO_TELEMETRY`
-  opt-out, create `~/.claude/cozempic-metrics/` if absent, and append atomically.
-  _(Req 1.4, 1.5, 1.8, 1.9)_
-- [ ] 1.3 Add per-`session_id` idempotency (tail-scan existing file, skip if
-  already recorded). _(Req 1.6)_
-- [ ] 1.4 Unit tests: `costUSD` sum, usage-only fallback (`cost_usd=null`),
-  duplicate-session no-op, opt-out env, unwritable-dir degrade, atomic-write
-  crash-safety. _(Req 1.2–1.9)_
+Split out to `claude/session-cost-logging` (`.kiro/specs/session-cost-logging/spec.md`).
+No tasks here. Task group numbers 2+ retained for stability.
 
 ## 2. Cache-aware compression (prune-to-target + idle trigger)
 
@@ -71,20 +60,19 @@ stays green between steps.
 
 - [ ] 3.1 Add `cmd_session_end(args)` in `src/cozempic/cli.py`: read stdin
   payload, take `snapshot_session(path)`, `load_messages` once, call
-  `record_session_cost` THEN `compress_to_target` (cost first — Req 2.10), always
-  exit 0. _(Req 1.1, 1.7, 2.3, 2.10)_
+  `compress_to_target`, always exit 0. _(Req 2.3)_
 - [ ] 3.2 Register the `session-end` subparser in `build_parser` and wire
-  dispatch. _(Req 1.1)_
+  dispatch. _(Req 2.3)_
 - [ ] 3.3 Add a `SessionEnd` hook block to `src/cozempic/data/hooks.json` and
   the `plugin/hooks/hooks.json` mirror; bump the embedded `cozempic-hook-schema`
-  marker `v13 → v14` everywhere it appears. _(Req 1.1, 2.1)_
+  marker `v13 → v14` everywhere it appears. _(Req 2.3)_ (Coordinate with the
+  session-cost-logging PR, which also wants a `SessionEnd` hook — avoid a clash.)
 - [ ] 3.4 Extend `tests/test_hooks_sync.py` to cover the new block and the
-  schema-marker bump (both files identical). _(Req 1.1)_
+  schema-marker bump (both files identical). _(Req 2.3)_
 - [ ] 3.5 Verify `init`/`doctor` re-sync installed hooks on the schema bump
-  (smoke check `cmd_init` / `cmd_doctor`). _(Req 1.1)_
-- [ ] 3.6 Integration test: feed a fixture payload to `session-end` and assert a
-  cost record is written AND the transcript is compressed, with cost reflecting
-  pre-strip `costUSD`. _(Req 1.4, 2.8)_
+  (smoke check `cmd_init` / `cmd_doctor`). _(Req 2.3)_
+- [ ] 3.6 Integration test: feed a fixture payload to `session-end` and assert the
+  transcript is compressed. _(Req 2.3)_
 
 ## 4. GitHub Actions SHA pinning
 
@@ -136,8 +124,7 @@ stays green between steps.
 - [ ] 7.1 Run the full test suite; confirm no regression in existing hook tests.
 - [ ] 7.2 Update CHANGELOG / version-sync checklist locations (the repo keeps
   packaging mirrors in lockstep — see `git log` release-sync commits).
-- [ ] 7.3 Manual smoke: trigger a real `SessionEnd`, confirm a cost line lands in
-  `~/.claude/cozempic-metrics/session-costs.jsonl` and the transcript shrank.
+- [ ] 7.3 Manual smoke: trigger a real `SessionEnd`, confirm the transcript shrank.
 
 ---
 
@@ -145,7 +132,9 @@ stays green between steps.
 
 These are independent and can ship as separate PRs to keep review tight:
 
-1. **PR A** — Tasks 1–3 (cost accounting + compression + SessionEnd hook).
+1. **PR A** — Tasks 2–3 (compression + SessionEnd hook).
 2. **PR B** — Tasks 4–5 (CI/action/build SHA + hash pinning).
 3. **PR C** — Task 6 (auto-update opt-in flip; the only user-facing default
    change — gets its own review + changelog note).
+
+(Session-cost logging — former Task group 1 — is its own PR: `claude/session-cost-logging`.)

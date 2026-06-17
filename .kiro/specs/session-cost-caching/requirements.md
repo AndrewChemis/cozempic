@@ -1,31 +1,39 @@
-# Requirements — Session-End Cost Accounting, Cache-Friendly Compression & Supply-Chain Hardening
+# Requirements — Cache-Aware Compression & Supply-Chain Hardening
 
 ## Introduction
 
-This spec covers three capabilities investigated together on branch
+> **Moved out:** the former *Requirement 1 — session-end cost accounting (write
+> total cost to a file)* has been split into its own branch/PR
+> (`claude/session-cost-logging`, spec at `.kiro/specs/session-cost-logging/`) as an
+> independent idea. It is no longer part of this spec. (GitHub Issues are disabled
+> on this repo, so it is tracked as a separate PR.)
+
+This spec covers two capabilities investigated together on branch
 `claude/session-cost-caching`:
 
-1. **Session-end cost accounting** — on true session end, write the total cost
-   of the session to a durable file outside the repository.
-2. **Cache-aware session compression** — when an interactive session goes idle
-   past the prompt-cache TTL (or ends explicitly), run a Cozempic prune that
-   takes the transcript to a safe margin below the auto-compaction threshold, so
-   that a later re-trigger replays a slim prefix AND avoids a costly compaction
-   event. The trigger is timed to cache expiry: once the warm cache is forfeit,
-   pruning costs nothing and pre-positions a cheaper re-trigger.
-3. **Supply-chain hardening** — pin GitHub Actions and Python build tooling to
-   immutable SHAs, and change the auto-update default from opt-out to opt-in so a
-   compromised PyPI release cannot silently propagate to every user.
+- **Cache-aware session compression** (Requirement 2) — when an interactive
+   session goes idle past the prompt-cache TTL (or ends explicitly), run a Cozempic
+   prune that takes the transcript to a safe margin below the auto-compaction
+   threshold, so that a later re-trigger replays a slim prefix AND avoids a costly
+   compaction event. The trigger is timed to cache expiry: once the warm cache is
+   forfeit, pruning costs nothing and pre-positions a cheaper re-trigger.
+- **Supply-chain hardening** (Requirements 3–5) — pin GitHub Actions and Python
+   build tooling to immutable SHAs, and change the auto-update default from opt-out
+   to opt-in so a compromised PyPI release cannot silently propagate to every user.
+
+(Requirement numbers 2–5 are retained as-is for cross-reference stability after
+Requirement 1 was split out.)
 
 > **Feasibility status (updated).** Investigation concluded that Requirement 2's
 > *automatic, local, reduce-the-rebuild on a left-open/walk-away live session* is
 > **NOT achievable** with current Claude Code hooks/architecture — a live session
 > is in-memory authoritative, no hook can inject a pruned transcript, and applying
 > one requires a disruptive exit+resume cycle. See `evidence-trail.md` §7. The
-> feasible subset is Req 1 (cost logging), Req 2 **only** for the closed-then-`--resume`
-> pattern or as a semi-automatic nudge, the `ENABLE_PROMPT_CACHING_1H` config path,
-> and Req 3–5 (supply chain). Requirement 2's live-walk-away criteria are retained
-> below for the record but are superseded by this verdict.
+> feasible subset is Req 2 **only** for the closed-then-`--resume` pattern or as a
+> semi-automatic nudge, the `ENABLE_PROMPT_CACHING_1H` config path, and Req 3–5
+> (supply chain) — plus the `statusline-nudge.md` feature. Requirement 2's
+> live-walk-away criteria are retained below for the record but are superseded by
+> this verdict.
 
 ### Grounding in the current codebase
 
@@ -51,48 +59,11 @@ This spec covers three capabilities investigated together on branch
 
 ---
 
-## Requirement 1 — Session-end cost accounting
+## Requirement 1 — Session-end cost accounting → MOVED
 
-**User story:** As a Cozempic user, I want the total cost of each Claude Code
-session recorded to a durable file outside my repository when the session ends,
-so that I can track spend over time without polluting my project tree.
-
-### Acceptance criteria
-
-1.1. WHEN a Claude Code session ends THEN Cozempic SHALL be invoked via a
-`SessionEnd` hook receiving the hook payload (`session_id`, `transcript_path`,
-`cwd`, `reason`) on stdin.
-
-1.2. WHEN the cost command runs AND the transcript contains per-message
-`costUSD` fields THEN the system SHALL compute the session total as the sum of
-those fields.
-
-1.3. IF the transcript contains no `costUSD` fields (e.g. subscription plans)
-THEN the system SHALL record the exact token usage (input, output,
-cache-creation, cache-read) from `extract_usage_tokens` AND mark the dollar
-total as unavailable rather than reporting `$0.00`.
-
-1.4. WHEN a session total is computed THEN the system SHALL append one JSON
-record to `~/.claude/cozempic-metrics/session-costs.jsonl` containing at least:
-`session_id`, `project`, `ended_at` (ISO-8601 UTC), `cost_usd` (nullable),
-`cost_source` (`"costUSD"` | `"unavailable"`), `tokens_total`, and `model`.
-
-1.5. WHERE the metrics directory does not exist THEN the system SHALL create it
-(parents included) before writing.
-
-1.6. WHEN the same `session_id` ends more than once (duplicate `SessionEnd`
-delivery) THEN the system SHALL NOT write a duplicate record for that session.
-
-1.7. IF the transcript path is missing, empty, or unreadable THEN the system
-SHALL exit 0 without writing and without raising, so the hook never disrupts
-shutdown.
-
-1.8. WHERE `COZEMPIC_NO_TELEMETRY` or a dedicated cost opt-out
-(`COZEMPIC_COST_LOG_OFF`) is set THEN the system SHALL NOT write the cost file.
-
-1.9. WHEN the append occurs THEN the write SHALL be atomic/crash-safe (tmp +
-fsync + replace, or append-with-lock) consistent with existing Cozempic write
-discipline (`digest._atomic_write_text`).
+Split out to its own branch/PR (`claude/session-cost-logging`, spec at
+`.kiro/specs/session-cost-logging/spec.md`). Not part of this spec anymore. The
+number 1 is left vacant so Requirements 2–5 keep their identifiers.
 
 ---
 
@@ -191,9 +162,11 @@ pre-compression transcript consistent with `save_messages(create_backup=True)`.
 floor (`COZEMPIC_SESSION_END_COMPRESS_MIN_BYTES`), or the opt-out
 (`COZEMPIC_SESSION_END_COMPRESS_OFF`) is set THEN compression SHALL be skipped.
 
-2.10. WHEN compression strips exact-usage metadata THEN cost accounting
-(Requirement 1) SHALL read `costUSD`/usage **before** the compression pass runs,
-so the two steps do not race over the same fields.
+2.10. (Cross-feature note) Compression's `metadata-strip` removes `costUSD`/usage
+fields. IF the separate session-cost-logging feature
+(`claude/session-cost-logging`) ever runs in the same hook THEN it MUST read those
+fields **before** compression, so the two do not race. They are independent
+features and need not share a hook.
 
 ### Resume backstop — pre-empt native compaction
 

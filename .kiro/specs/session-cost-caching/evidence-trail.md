@@ -147,7 +147,8 @@ and that cycle cannot be driven automatically and non-disruptively from outside 
 
 ## 8. What remains feasible (the salvageable subset)
 
-- **Cost logging at session end** — fire-and-forget, 0 tokens, pure upside. (Requirement 1.)
+- **Cost logging at session end** — fire-and-forget, 0 tokens, pure upside. (Split
+  out to its own feature/PR: `claude/session-cost-logging`.)
 - **Compression for the closed-then-reopened pattern** — `claude --resume` reads the pruned
   file fresh, so a smaller rebuild lands automatically. Works *if the user exits and resumes*
   (not the walk-away pattern).
