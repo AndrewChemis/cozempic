@@ -229,10 +229,15 @@ SessionStart(resume), same session_id
                                           (LLM summary over the large prefix)
 ```
 
-**Why this is cheaper either way** (see `cost-analysis.md`): native compaction
-spends an output-rate summary ≈12% of the *large* prefix plus rework. The reload
-fallback spends a cache-creation (1.25×) over the *already-pruned, smaller*
-prefix and no LLM summary. Mechanical prune < LLM compaction, always.
+**Do not double-pay the resume rebuild.** If the hook runs AFTER ingestion,
+Claude has already reprocessed the un-pruned prefix on this resume — that rebuild
+is sunk. `reload-self` would then add a SECOND (smaller) rebuild, so in the
+post-ingestion case the backstop prunes the file for the NEXT resume and skips
+`reload-self` for cost purposes (it becomes an optional tradeoff that only pays
+off via cheaper subsequent cache-reads on long post-resume sessions). The current
+resume's rebuild is reduced ONLY when the hook runs pre-ingestion. This is why
+pruning DURING idle (daemon alive, before resume) is the high-value path and does
+not depend on the hook-timing question — the resume backstop is a secondary net.
 
 **Sequencing — the one thing to confirm.** Whether the `SessionStart(resume)`
 hook fires before or after Claude ingests the transcript decides which branch is

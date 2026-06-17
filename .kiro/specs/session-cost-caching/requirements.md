@@ -198,13 +198,21 @@ before Claude's does.
 Cozempic SHALL prune it to target as a backstop, so the resumed session loads
 slim and native auto-compaction does not fire.
 
-2.12. IF the resumed process has already ingested the un-pruned transcript by the
-time the `SessionStart` hook runs (so an in-place edit cannot affect the current
-context — the same constraint that makes Cozempic use `reload` today) THEN the
-backstop SHALL fall back to `guard --reload-self` to re-enter against the pruned
-transcript. The re-ingest is a cache-creation over the **smaller** pruned prefix
-(mechanical, no LLM), which SHALL be cheaper than native compaction summarizing
-the **larger** prefix.
+2.12. The backstop's effect on the CURRENT resume depends on hook-vs-ingestion
+ordering, and it SHALL NOT cause a double-paid rebuild:
+  - IF the hook runs BEFORE Claude ingests the transcript THEN pruning in place
+    reduces this resume's rebuild directly (Claude ingests the slim file).
+  - IF the hook runs AFTER ingestion THEN this resume's full rebuild is already
+    sunk; the backstop SHALL prune the file to benefit the NEXT resume (and
+    cheaper subsequent cache-reads) and SHALL NOT trigger `guard --reload-self`
+    purely to cut the already-paid resume cost — that would add a second
+    (smaller) rebuild. `reload-self` is then an OPTIONAL tradeoff that pays off
+    only via cheaper subsequent reads on long post-resume sessions.
+
+2.12a. Because of 2.12, the **high-value path is pruning DURING idle** (daemon
+alive, before resume), which is independent of hook ordering. The resume backstop
+is a secondary safety net for when idle/SessionEnd pruning did not run (daemon
+not alive, e.g. the terminal was fully closed).
 
 2.13. WHERE the resumed transcript is already at/below target (e.g. it was
 pruned at idle/SessionEnd) THEN the resume backstop SHALL no-op.
