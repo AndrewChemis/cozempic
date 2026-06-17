@@ -67,6 +67,34 @@ R10. WHERE the user opts into `refreshInterval: N` in settings THEN the command
 SHALL remain correct when re-run on a timer during idle (idempotent, no state
 mutation required to render).
 
+### Integration with `ccstatusline` (the popular status-line tool)
+
+Many users already run **ccstatusline** as their `statusLine.command`. Cozempic
+SHALL integrate with it rather than clobber it, and fall back to standalone only
+when it is absent. (Exact widget mechanism/config path pending research agent
+`a77a5f5…`; the contract below holds regardless.)
+
+R11. `cozempic init --statusline` SHALL **detect ccstatusline** (e.g. the
+`statusLine.command` in `~/.claude/settings.json` references `ccstatusline`, or its
+config file is present) and branch:
+  - **ccstatusline present** → register a Cozempic **custom-command segment/widget**
+    inside ccstatusline's own config (with consent), so Cozempic composes *into* the
+    user's existing status line. Cozempic SHALL NOT replace the `statusLine.command`.
+  - **ccstatusline absent** → offer the standalone path: set `statusLine.command` to
+    `cozempic statusline`, or `--wrap` an existing custom command (R6/R7).
+
+R12. WHEN integrating into ccstatusline THEN Cozempic's segment SHALL render **only
+its value-add** — the **reload nudge** (and optional cache-miss marker) — and SHALL
+NOT duplicate context%/cost segments that ccstatusline already provides. A
+`cozempic statusline --segment nudge` mode SHALL emit just that segment for use as a
+custom-command widget. (Standalone mode still renders the full context% + cost + nudge.)
+
+R13. WHERE Cozempic edits ccstatusline's config THEN the write SHALL be atomic,
+reversible, and idempotent (re-running init does not add duplicate widgets), and
+SHALL never corrupt or reorder the user's existing widgets. IF the config schema is
+unknown/unsupported THEN init SHALL fall back to printing manual instructions rather
+than editing blindly.
+
 ## Design
 
 - **New command** `cmd_statusline(args)` in `cli.py`, registered in `build_parser`.
@@ -86,6 +114,15 @@ mutation required to render).
 - **`init --statusline`**: read `~/.claude/settings.json` (honoring `CLAUDE_CONFIG_DIR`),
   detect `statusLine`, prompt to wrap-or-set, write atomically (reuse existing atomic
   settings writer). Add to `cozempic doctor` a check that the status line is wired.
+- **ccstatusline branch** (R11–R13): detect ccstatusline (by `statusLine.command`
+  substring and/or its config file), and when present add a custom-command widget
+  pointing at `cozempic statusline --segment nudge` to ccstatusline's config — atomic,
+  idempotent, reversible; fall back to printed manual instructions if the schema is
+  unrecognized. Three install outcomes total: (a) integrate into ccstatusline,
+  (b) standalone `cozempic statusline`, (c) `--wrap` an existing custom command.
+- **`--segment <name>`**: render a single named segment (`nudge`, `context`, `cost`,
+  `cache`) so Cozempic can be embedded as a widget without duplicating what the host
+  status line already shows.
 
 ## Tasks
 
@@ -95,6 +132,8 @@ mutation required to render).
 - [ ] Register subparser; reuse nudge-tier helpers.
 - [ ] `init --statusline` opt-in wiring (detect existing, wrap-with-consent, atomic
   write, never clobber) + tests.
+- [ ] ccstatusline detection + custom-widget registration (atomic/idempotent/
+  reversible; manual-instructions fallback) + `--segment nudge` mode + tests.
 - [ ] `doctor` check: status line wired? + advise enabling.
 - [ ] Docs/README: how to enable, `--wrap`, opt-outs, `refreshInterval` note.
 
