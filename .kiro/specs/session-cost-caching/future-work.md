@@ -41,6 +41,50 @@ makes the message **model-visible** — it costs tokens and the model may *act* 
 
 ---
 
+## RECOMMENDED PRIMARY SURFACE — the status line (replaces the broken nudge)
+
+The Stop-hook `systemMessage` channel is unreliable (§0). The **status line** is a
+first-class, reliably-rendered surface and is the better home for the nudge **and**
+the cost display (original Requirement 1) at once.
+
+**Why it fits (corrected from the research agent's over-cautious verdict):** the
+agent flagged it "problematic" only because of #50679 — the status line is hidden
+*during long task execution*. That is irrelevant here: we surface the nudge at the
+`❯` prompt, which is exactly when the status line IS shown and exactly the moment a
+user decides to reload or is returning from idle. For both target scenarios
+(pre-reload ~50%, returning-from-idle) it is reliable where `systemMessage` is broken.
+
+**The payload does the work for us.** The status-line stdin JSON already includes
+(code.claude.com/docs/en/statusline):
+- `context_window.used_percentage` (+ `current_usage` cache_read/cache_creation split)
+- `cost.total_cost_usd`, `total_duration_ms`
+- `transcript_path`, `session_id`, `model`, `exceeds_200k_tokens`, `rate_limits`
+
+So a new **`cozempic statusline`** command:
+- reads stdin, prints a compact segment e.g. `↯ 62% · $0.34`, and above a tier
+  appends a colorized nudge `⚠ /cozempic reload` (yellow ≥55%, red ≥80%);
+- surfaces the **post-idle cache-miss** signal directly from `current_usage`
+  (high `cache_creation`, ~0 `cache_read` ⇒ "rebuilt after idle");
+- falls back to reading `transcript_path` only when `used_percentage` is null
+  (pre-first-API-call). ANSI color, emoji, multi-line, OSC-8 links all supported.
+
+**Constraints / design:**
+- Exactly ONE `statusLine` command; **no plugin composition API**. So Cozempic must
+  be **opt-in and composable**: a `--wrap '<user existing status cmd>'` mode that runs
+  the user's command, captures its output, and appends Cozempic's segment.
+  `cozempic init --statusline` detects an existing `statusLine` and offers to wrap it
+  **with consent** — never silently clobbers.
+- Optional `refreshInterval: N` in settings re-runs it during idle (for a live clock /
+  "cache likely expired" countdown), at the cost of a periodic exec.
+- This consolidates **cost display + context % + reload nudge + cache-miss FYI** into
+  one zero-token, never-model-visible surface. Promote above the Stop-hook nudge.
+
+**Spinner — NOT a viable channel.** `spinnerVerbs: {mode, verbs}` customizes only the
+**top-line verb word**; the whimsical sub-line messages (the actual "Discombobulating…"
+venue Kickbacks.ai uses) are **hardcoded in the React UI and not customizable**
+(#50510, #21599, #27982 — won't-do/duplicate). The verb also shows *during work*, not
+at the prompt — wrong moment for a reload nudge. Dead end for a CLI/plugin.
+
 ## (B) Idle / 5-minute cache-miss sessions — highest value, most feasible
 
 1. **`cozempic doctor` cache-TTL check** *(do first).* Detect auth mode + whether
@@ -83,8 +127,14 @@ makes the message **model-visible** — it costs tokens and the model may *act* 
 
 ## Suggested order
 
-Biggest payoff for least work: **#1 (doctor TTL check)** + **#2 (post-idle miss
-detector)** for scenario B; **#3 (advisor)** for scenario A; **#0** to make the
-nudge actually visible; then **#6–#8** cleanups. Note that #0 gates how visible
-#2/#3 are — if Stop `systemMessage` stays broken, route the important signals
-through `doctor`/`current`, which the user invokes directly and always render.
+Biggest payoff for least work:
+1. **`cozempic statusline`** (the recommended primary surface) — it simultaneously
+   fixes the broken nudge (§0), delivers the cost display (Req 1), and carries the
+   context-% + cache-miss signals, all from the status-line payload. Highest leverage.
+2. **#1 (doctor TTL check)** + **#2 (post-idle miss detector)** for scenario B.
+3. **#3 (advisor)** for scenario A — its output now has a reliable home (the status line).
+4. **#6–#8** cleanups.
+
+The status line supersedes the §0 dilemma: instead of fighting the unreliable Stop
+`systemMessage`, route the nudge + cost + cache-miss signals through the status line
+(reliable at the prompt) and keep `doctor`/`current` for explicit on-demand detail.
